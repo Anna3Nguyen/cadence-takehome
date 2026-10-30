@@ -70,23 +70,39 @@ def _fmt_pct(n: int, total: int) -> str:
     return f"{100 * n / total:.1f}%"
 
 
-def _fmt_issues(issues: list[dict] | None) -> str:
-    """Render issues without assuming an evidence format (it is implementation-defined)."""
-
-    if not issues:
-        return "(none)"
+def _fmt_sources(sources: list[dict] | None) -> list[str]:
     lines: list[str] = []
-    for i, iss in enumerate(issues, 1):
-        cat = iss.get("category", "?")
-        desc = iss.get("description", "")
-        line = f"  {i}. [{cat}] {desc}"
-        evidence = iss.get("evidence")
-        if evidence:
-            if not isinstance(evidence, str):
-                evidence = json.dumps(evidence, ensure_ascii=False)
-            line += f"\n     evidence: {evidence}"
-        lines.append(escape(line))
-    return "\n".join(lines)
+    for src in sources or []:
+        date = f" ({src['date']})" if src.get("date") else ""
+        lines.append(
+            f"       - {src.get('kind', '?')} {src.get('id', '?')}{date}: "
+            f"\"{src.get('quote', '')}\""
+        )
+    return lines
+
+
+def _fmt_findings(findings: list[dict] | None, tag_keys: tuple[str, ...]) -> str:
+    """Render issues or checks: a tag, the finding, then each source with its quote."""
+
+    if not findings:
+        return "  (none)"
+    lines: list[str] = []
+    for i, finding in enumerate(findings, 1):
+        tag = "/".join(str(finding.get(key, "?")) for key in tag_keys)
+        lines.append(f"  {i}. [{tag}] {finding.get('finding', '')}")
+        lines += _fmt_sources(finding.get("sources"))
+    return escape("\n".join(lines))
+
+
+def _fmt_ignored(medications: list[dict] | None) -> str:
+    if not medications:
+        return "  (none)"
+    lines: list[str] = []
+    for med in medications:
+        unverified = "" if med.get("quote_verified") else " (quote not verified)"
+        lines.append(f"  - {med.get('name', '?')}: {med.get('reason', '')}{unverified}")
+        lines += _fmt_sources([med.get("source") or {}])
+    return escape("\n".join(lines))
 
 
 # ---------------------------------------------------------------------------
@@ -324,7 +340,13 @@ class EvalReportApp(App):
         lines.append(f"  {escape(label.get('rationale') or '—')}")
 
         lines.append("\n[bold]Actual issues:[/bold]")
-        lines.append(_fmt_issues(actual.get("issues")))
+        lines.append(_fmt_findings(actual.get("issues"), ("category", "reason")))
+
+        lines.append("\n[bold]Checks:[/bold]")
+        lines.append(_fmt_findings(actual.get("checks"), ("rule", "status")))
+
+        lines.append("\n[bold]Ignored medications:[/bold]")
+        lines.append(_fmt_ignored(actual.get("ignored_medications")))
 
         lines.append("\n[bold]Actual explanation:[/bold]")
         lines.append(f"  {escape(str(actual.get('explanation', '—')))}")
