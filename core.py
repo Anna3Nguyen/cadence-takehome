@@ -155,16 +155,63 @@ class PatientSubmission(BaseModel):
     documents: list[Document] = Field(default_factory=list)
     metadata: SubmissionMetadata | None = None
 
+RuleId = Literal[
+    "required_fields",
+    "hp",
+    "consent",
+    "labs",
+    "anticoagulation",
+    "blood_pressure",
+    "temperature",
+    "system",
+]
+IssueReason = Literal[
+    "policy_failed",
+    "missing",
+    "conflict",
+    "unverified_quote",
+    "extraction_failed",
+    "invalid_submission",
+    "internal_error",
+]
+CheckStatus = Literal["passed", "not_applicable", "not_evaluated"]
+SourceKind = Literal["document", "lab", "vital", "medication", "field"]
+ComputedValue = str | int | float | bool | None
+
+class Source(BaseModel):
+    """Where a piece of evidence came from, so a reviewer can find it in the chart."""
+
+    kind: SourceKind
+    # doc_id or lab id, else a path such as "vitals[1]" or "procedure.procedure_date"
+    id: str
+    date: str | None = None
+    quote: str
+
 class TriageIssue(BaseModel):
+    """A blocking problem, with the evidence a reviewer needs to verify it."""
 
     category: IssueCategory
-    evidence: str
+    reason: IssueReason
+    rule: RuleId
+    finding: str
+    sources: list[Source] = Field(default_factory=list)
+    computed: dict[str, ComputedValue] = Field(default_factory=dict)
+
+class RuleCheck(BaseModel):
+    """A rule that did not block, and why, so READY results can be spot-checked."""
+
+    rule: RuleId
+    status: CheckStatus
+    finding: str
+    sources: list[Source] = Field(default_factory=list)
+    computed: dict[str, ComputedValue] = Field(default_factory=dict)
 
 class TriageOutput(BaseModel):
     """Structured output contract for triage responses."""
 
     decision: Decision
     issues: list[TriageIssue] = Field(validation_alias=AliasChoices("issues"))
+    checks: list[RuleCheck] = Field(default_factory=list)
     explanation: str
 
 
