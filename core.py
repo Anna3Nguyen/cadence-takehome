@@ -206,12 +206,21 @@ class RuleCheck(BaseModel):
     sources: list[Source] = Field(default_factory=list)
     computed: dict[str, ComputedValue] = Field(default_factory=dict)
 
+class IgnoredMedication(BaseModel):
+    """A medication no rule acts on, listed so a reviewer can see it was not missed."""
+
+    name: str
+    reason: str
+    quote_verified: bool
+    source: Source
+
 class TriageOutput(BaseModel):
     """Structured output contract for triage responses."""
 
     decision: Decision
     issues: list[TriageIssue] = Field(validation_alias=AliasChoices("issues"))
     checks: list[RuleCheck] = Field(default_factory=list)
+    ignored_medications: list[IgnoredMedication] = Field(default_factory=list)
     explanation: str
 
 

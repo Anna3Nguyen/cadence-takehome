@@ -107,6 +107,19 @@ def _output_payload() -> dict[str, Any]:
                 "computed": {"days_before": 8, "limit_days": 30},
             }
         ],
+        "ignored_medications": [
+            {
+                "name": "acetaminophen 500 mg PRN",
+                "reason": "not an anticoagulant",
+                "quote_verified": True,
+                "source": {
+                    "kind": "document",
+                    "id": "doc-2",
+                    "date": "2026-02-26",
+                    "quote": "Takes acetaminophen 500 mg PRN for pain.",
+                },
+            }
+        ],
         "explanation": "H&P is outside the 30-day window.",
     }
 

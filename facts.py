@@ -17,7 +17,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 
-class _Fact(BaseModel):
+class Fact(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     doc_id: str = Field(description="doc_id of the document this fact was read from.")
@@ -29,7 +29,7 @@ class _Fact(BaseModel):
     )
 
 
-class HPDocument(_Fact):
+class HPDocument(Fact):
     """A document that is a history and physical (H&P), whatever its title says."""
 
     is_preop_hp: bool = Field(
@@ -40,7 +40,7 @@ class HPDocument(_Fact):
     )
 
 
-class Consent(_Fact):
+class Consent(Fact):
     """A surgical consent form or consent record."""
 
     patient_signed: bool = Field(
@@ -61,7 +61,7 @@ class Consent(_Fact):
     )
 
 
-class MedicationMention(_Fact):
+class MedicationMention(Fact):
     """A statement about whether the patient takes a medication, including
     medications missing from the structured medication list. Exclude medications
     that are only proposed as part of a plan, such as a planned enoxaparin bridge."""
@@ -75,7 +75,7 @@ class MedicationMention(_Fact):
     )
 
 
-class AnticoagPlan(_Fact):
+class AnticoagPlan(Fact):
     """Perioperative instructions for managing an anticoagulant around this
     procedure. quote is the text naming the medication the plan manages."""
 
@@ -95,7 +95,7 @@ class AnticoagPlan(_Fact):
     )
 
 
-class NoteVital(_Fact):
+class NoteVital(Fact):
     """A blood pressure or temperature reading written in a document's text.
     Extract every reading, including rechecks, as its own item. References such
     as 'see flowsheet' are not readings."""
@@ -117,7 +117,7 @@ class NoteVital(_Fact):
     )
 
 
-class ProcedureDateMention(_Fact):
+class ProcedureDateMention(Fact):
     """A statement of the scheduled date for this procedure."""
 
     date: str = Field(description="YYYY-MM-DD.")
