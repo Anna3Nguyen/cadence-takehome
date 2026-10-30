@@ -1,142 +1,299 @@
 from __future__ import annotations
 
-import json
-import sys
 from types import SimpleNamespace
+from typing import Any, get_args
 from unittest.mock import Mock
 
 import pytest
-from pydantic import ValidationError
 
-from core import (
-    BASELINE_SYSTEM_PROMPT,
-    PatientSubmission,
-    TriageOutput,
-    triage_output_json_schema,
-    triage_submission,
+import pipeline
+from core import RuleId, TriageOutput, triage_submission
+from facts import (
+    Consent,
+    ExtractedFacts,
+    HPDocument,
+    MedicationMention,
+    NoteVital,
 )
+from pipeline import DOCUMENT_RULES, triage
+
+ALL_RULES = set(get_args(RuleId)) - {"system"}
 
 
-@pytest.fixture
-def openai_client(monkeypatch: pytest.MonkeyPatch) -> Mock:
-    client = Mock()
-    client.responses.create.return_value = SimpleNamespace(
-        output_text=json.dumps(
-            {
-                "decision": "READY",
-                "issues": [],
-                "explanation": "All required criteria are satisfied.",
-            }
-        ),
-    )
-
-    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=lambda: client))
-    return client
-
-
-@pytest.fixture
-def submission_payload() -> dict[str, object]:
-    return {
-        "patient": {"id": "patient-1"},
+def _submission(**overrides: Any) -> dict[str, Any]:
+    submission: dict[str, Any] = {
+        "patient": {"id": "patient-1", "name": {"given": "Grace", "family": "Lopez"}},
         "procedure": {
-            "case_id": "case-1",
+            "procedure_type": "Elective carpal tunnel release",
             "procedure_risk": "LOW",
-            "procedure_date": "2026-02-01",
+            "procedure_date": "2026-03-01",
         },
         "vitals": [
             {
                 "type": "blood_pressure",
-                "systolic": 120,
-                "diastolic": 80,
-                "date": "2026-01-25",
+                "systolic": 130,
+                "diastolic": 79,
+                "date": "2026-02-17T09:05:00Z",
+                "source": "Pre-op clinic",
             }
         ],
         "labs": [
             {
+                "id": "lab-cbc",
                 "code": "CBC",
-                "display": "Complete blood count",
-                "effective_at": "2026-01-20",
+                "display": "Complete Blood Count",
+                "effective_at": "2026-02-11T11:29:00Z",
                 "status": "final",
             }
         ],
-        "medications": [],
-        "conditions": [],
+        "medications": [{"name": "tamsulosin 0.4 mg PO nightly", "active": True}],
         "documents": [
             {
-                "type": "history_and_physical",
-                "date": "2026-01-20",
-                "text": "History and physical completed.",
+                "doc_id": "hp-1",
+                "type": "History and Pyhsical",
+                "date": "2026-02-21",
+                "text": "HISTORY AND PHYSICAL\nPre-op evaluation complete for carpal tunnel release.",
             },
             {
-                "type": "surgical_consent",
-                "date": "2026-01-22",
-                "text": "Signed surgical consent.",
+                "doc_id": "consent-1",
+                "type": "Surgery Consent (scanned)",
+                "date": "2026-02-27",
+                "text": "Procedure: carpal tunnel release\nPatient signature: /s/ Grace Lopez",
+            },
+            {
+                "doc_id": "nursing-1",
+                "type": "Pre-op Nursing Intake",
+                "date": "2026-02-26",
+                "text": "10:15 BP 119/73, T 97.9 F.\nTakes acetaminophen 500 mg PRN.",
             },
         ],
     }
+    submission.update(overrides)
+    return submission
 
 
-def test_triage_submission_returns_structured_output(
-    openai_client: Mock,
-    submission_payload: dict[str, object],
-) -> None:
-    output = triage_submission(submission_payload, model="test-model")
+def _facts(**overrides: Any) -> ExtractedFacts:
+    facts: dict[str, Any] = {
+        "hp_documents": [
+            HPDocument(
+                doc_id="hp-1",
+                quote="Pre-op evaluation complete for carpal tunnel release.",
+                is_preop_hp=True,
+            )
+        ],
+        "consents": [
+            Consent(
+                doc_id="consent-1",
+                quote="Patient signature: /s/ Grace Lopez",
+                patient_signed=True,
+                procedure_named="carpal tunnel release",
+                matches_scheduled_procedure=True,
+            )
+        ],
+        "medication_mentions": [
+            MedicationMention(
+                doc_id="nursing-1",
+                quote="Takes acetaminophen 500 mg PRN.",
+                name="acetaminophen 500 mg PRN",
+                status="taking",
+            )
+        ],
+        "anticoag_plans": [],
+        "note_vitals": [
+            NoteVital(
+                doc_id="nursing-1",
+                quote="10:15 BP 119/73",
+                kind="blood_pressure",
+                systolic=119,
+                diastolic=73,
+                temperature=None,
+                temperature_unit=None,
+                measured_on=None,
+                measured_time="10:15",
+            ),
+            NoteVital(
+                doc_id="nursing-1",
+                quote="T 97.9 F.",
+                kind="temperature",
+                systolic=None,
+                diastolic=None,
+                temperature=97.9,
+                temperature_unit="F",
+                measured_on=None,
+                measured_time="10:15",
+            ),
+        ],
+        "procedure_date_mentions": [],
+    }
+    facts.update(overrides)
+    return ExtractedFacts(**facts)
 
-    assert isinstance(output, TriageOutput)
+
+def _client(
+    facts: ExtractedFacts | None = None, error: Exception | None = None
+) -> Mock:
+    client = Mock()
+    if error is not None:
+        client.responses.parse.side_effect = error
+    else:
+        client.responses.parse.return_value = SimpleNamespace(output_parsed=facts)
+    return client
+
+
+def _run(submission: Any, client: Mock) -> TriageOutput:
+    return triage(submission, model="test-model", client=client, cache_dir=None)
+
+
+def _reported_rules(output: TriageOutput) -> set[str]:
+    return {finding.rule for finding in [*output.issues, *output.checks]}
+
+
+# -------------------------
+# End to end
+# -------------------------
+
+
+def test_clean_chart_is_ready_with_every_rule_checked() -> None:
+    output = _run(_submission(), _client(_facts()))
+
     assert output.decision == "READY"
     assert output.issues == []
-    assert output.explanation == "All required criteria are satisfied."
-
-    assert openai_client.responses.create.call_count == 1
-    call = openai_client.responses.create.call_args.kwargs
-    assert call["model"] == "test-model"
-    assert call["instructions"] == BASELINE_SYSTEM_PROMPT
-
-    text_config = call["text"]
-    assert isinstance(text_config, dict)
-    response_format = text_config["format"]
-    assert isinstance(response_format, dict)
-    assert response_format["type"] == "json_schema"
-    assert response_format["name"] == "preop_triage_output"
-    assert response_format["schema"] == triage_output_json_schema()
-    assert response_format["strict"] is False
+    assert {check.rule for check in output.checks} == ALL_RULES
+    assert all(check.status != "not_evaluated" for check in output.checks)
+    assert {m.name for m in output.ignored_medications} == {
+        "acetaminophen 500 mg PRN",
+        "tamsulosin 0.4 mg PO nightly",
+    }
+    assert output.explanation.startswith("READY: no blocking issues.")
 
 
-def test_triage_submission_builds_prompt_from_validated_submission(
-    openai_client: Mock,
-    submission_payload: dict[str, object],
-) -> None:
-    submission = PatientSubmission.model_validate(submission_payload)
-
-    triage_submission(submission, model="test-model")
-
-    assert openai_client.responses.create.call_count == 1
-    call = openai_client.responses.create.call_args.kwargs
-    message = call["input"][0]
-    content = message["content"][0]
-    prompt = content["text"]
-
-    assert message["type"] == "message"
-    assert message["role"] == "user"
-    assert content["type"] == "input_text"
-    assert json.loads(prompt.split("Submission JSON:\n", 1)[1]) == submission.model_dump()
-
-
-def test_triage_submission_rejects_invalid_model_json(
-    openai_client: Mock,
-    submission_payload: dict[str, object],
-) -> None:
-    openai_client.responses.create.return_value = SimpleNamespace(
-        output_text=json.dumps(
-            {
-                "decision": "MAYBE",
-                "issues": [],
-                "explanation": "Not a valid triage decision.",
-            }
-        )
+def test_decision_and_explanation_come_from_rule_issues() -> None:
+    unsigned = Consent(
+        doc_id="consent-1",
+        quote="Procedure: carpal tunnel release",
+        patient_signed=False,
+        procedure_named="carpal tunnel release",
+        matches_scheduled_procedure=True,
     )
 
-    with pytest.raises(ValidationError):
-        triage_submission(submission_payload, model="test-model")
+    output = _run(_submission(), _client(_facts(consents=[unsigned])))
 
-    assert openai_client.responses.create.call_count == 1
+    assert output.decision == "NEEDS_FOLLOW_UP"
+    assert [issue.category for issue in output.issues] == ["REQUIRED_DOCUMENTATION"]
+    assert output.issues[0].finding in output.explanation
+
+
+def test_triage_submission_runs_the_pipeline(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[dict[str, Any]] = []
+    sentinel = Mock(spec=TriageOutput)
+    monkeypatch.setattr(
+        pipeline, "triage", lambda submission, **kw: calls.append(kw) or sentinel
+    )
+
+    assert triage_submission(_submission(), model="m") is sentinel
+    assert calls == [{"model": "m"}]
+
+
+# -------------------------
+# Fail-safe
+# -------------------------
+
+
+@pytest.mark.parametrize(
+    "bad_input",
+    [
+        _submission(procedure={"procedure_risk": "EXTREME"}),
+        _submission(documents="not a list"),
+        "not a submission",
+        None,
+    ],
+    ids=["unknown-risk", "documents-not-a-list", "string", "none"],
+)
+def test_invalid_submission_needs_follow_up_without_calling_the_model(
+    bad_input: Any,
+) -> None:
+    client = _client(_facts())
+
+    output = _run(bad_input, client)
+
+    assert output.decision == "NEEDS_FOLLOW_UP"
+    [issue] = output.issues
+    assert (issue.rule, issue.reason) == ("system", "invalid_submission")
+    client.responses.parse.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "client",
+    [
+        _client(error=TimeoutError("request timed out")),
+        _client(facts=None),
+    ],
+    ids=["api-error", "refusal"],
+)
+def test_extraction_failure_needs_follow_up_and_skips_document_rules(
+    client: Mock,
+) -> None:
+    output = _run(_submission(), client)
+
+    assert output.decision == "NEEDS_FOLLOW_UP"
+    assert (output.issues[0].rule, output.issues[0].reason) == (
+        "system",
+        "extraction_failed",
+    )
+    not_evaluated = {c.rule for c in output.checks if c.status == "not_evaluated"}
+    assert not_evaluated == DOCUMENT_RULES
+    assert {c.rule for c in output.checks if c.status == "passed"} == {
+        "required_fields",
+        "labs",
+    }
+    assert _reported_rules(output) == ALL_RULES | {"system"}
+
+
+def test_extraction_failure_keeps_a_structured_safety_exclusion() -> None:
+    hypertensive = _submission(
+        vitals=[
+            {
+                "type": "blood_pressure",
+                "systolic": 200,
+                "diastolic": 120,
+                "date": "2026-02-27T09:05:00Z",
+                "source": "Pre-op clinic",
+            }
+        ]
+    )
+
+    output = _run(hypertensive, _client(error=TimeoutError("request timed out")))
+
+    assert output.decision == "NOT_CLEARED"
+    assert {issue.category for issue in output.issues} == {
+        "MISSING_REQUIRED_DATA",
+        "ACUTE_SAFETY_EXCLUSION",
+    }
+    assert "blood_pressure" not in {c.rule for c in output.checks}
+
+
+def test_unverifiable_quote_needs_follow_up() -> None:
+    invented = HPDocument(
+        doc_id="hp-1", quote="Cleared for surgery by cardiology.", is_preop_hp=True
+    )
+
+    output = _run(_submission(), _client(_facts(hp_documents=[invented])))
+
+    assert output.decision == "NEEDS_FOLLOW_UP"
+    assert "unverified_quote" in {issue.reason for issue in output.issues}
+
+
+def test_internal_error_needs_follow_up_instead_of_crashing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def broken_rules(*args: Any, **kwargs: Any) -> None:
+        raise KeyError("boom")
+
+    monkeypatch.setattr(pipeline, "evaluate_rules", broken_rules)
+
+    output = _run(_submission(), _client(_facts()))
+
+    assert output.decision == "NEEDS_FOLLOW_UP"
+    [issue] = output.issues
+    assert (issue.rule, issue.reason) == ("system", "internal_error")
+    assert "KeyError" in issue.finding
