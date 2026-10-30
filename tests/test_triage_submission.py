@@ -77,14 +77,14 @@ def _facts(**overrides: Any) -> ExtractedFacts:
         "hp_documents": [
             HPDocument(
                 doc_id="hp-1",
-                quote="Pre-op evaluation complete for carpal tunnel release.",
+                line=2,
                 is_preop_hp=True,
             )
         ],
         "consents": [
             Consent(
                 doc_id="consent-1",
-                quote="Patient signature: /s/ Grace Lopez",
+                line=2,
                 patient_signed=True,
                 procedure_named="carpal tunnel release",
                 matches_scheduled_procedure=True,
@@ -93,7 +93,7 @@ def _facts(**overrides: Any) -> ExtractedFacts:
         "medication_mentions": [
             MedicationMention(
                 doc_id="nursing-1",
-                quote="Takes acetaminophen 500 mg PRN.",
+                line=2,
                 name="acetaminophen 500 mg PRN",
                 status="taking",
             )
@@ -102,7 +102,7 @@ def _facts(**overrides: Any) -> ExtractedFacts:
         "note_vitals": [
             NoteVital(
                 doc_id="nursing-1",
-                quote="10:15 BP 119/73",
+                line=1,
                 kind="blood_pressure",
                 systolic=119,
                 diastolic=73,
@@ -113,7 +113,7 @@ def _facts(**overrides: Any) -> ExtractedFacts:
             ),
             NoteVital(
                 doc_id="nursing-1",
-                quote="T 97.9 F.",
+                line=1,
                 kind="temperature",
                 systolic=None,
                 diastolic=None,
@@ -170,7 +170,7 @@ def test_clean_chart_is_ready_with_every_rule_checked() -> None:
 def test_decision_and_explanation_come_from_rule_issues() -> None:
     unsigned = Consent(
         doc_id="consent-1",
-        quote="Procedure: carpal tunnel release",
+        line=1,
         patient_signed=False,
         procedure_named="carpal tunnel release",
         matches_scheduled_procedure=True,
@@ -272,15 +272,22 @@ def test_extraction_failure_keeps_a_structured_safety_exclusion() -> None:
     assert "blood_pressure" not in {c.rule for c in output.checks}
 
 
-def test_unverifiable_quote_needs_follow_up() -> None:
-    invented = HPDocument(
-        doc_id="hp-1", quote="Cleared for surgery by cardiology.", is_preop_hp=True
-    )
+def test_citation_to_a_missing_line_needs_follow_up() -> None:
+    invented = HPDocument(doc_id="hp-1", line=9, is_preop_hp=True)
 
     output = _run(_submission(), _client(_facts(hp_documents=[invented])))
 
     assert output.decision == "NEEDS_FOLLOW_UP"
     assert "unverified_quote" in {issue.reason for issue in output.issues}
+
+
+def test_quotes_in_the_output_are_copied_from_the_cited_lines() -> None:
+    output = _run(_submission(), _client(_facts()))
+
+    hp_check = next(check for check in output.checks if check.rule == "hp")
+    assert hp_check.sources[0].quote == (
+        "Pre-op evaluation complete for carpal tunnel release."
+    )
 
 
 def test_internal_error_needs_follow_up_instead_of_crashing(

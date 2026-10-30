@@ -1,13 +1,15 @@
 """Facts the LLM extracts from free-text documents.
 
-Every fact cites the document it came from (doc_id) and a verbatim quote, which
-code verifies before any rule sees the fact. Facts never contain decisions: the
-model reports what a document says, and rules.py decides what it means.
+Every fact cites the document (doc_id) and the numbered line it came from. The model
+never writes quote text: verify.py copies the cited line from the document into
+`quote`, so every quote is exact by construction, and then checks the fact's values
+against it. Facts never contain decisions: the model reports what a document says,
+and rules.py decides what it means.
 
-Field descriptions are sent to the model as part of the JSON schema, so they
-double as extraction instructions. Every field is required (optional values are
-nullable) and extra fields are forbidden, as OpenAI strict structured outputs
-require.
+Field descriptions are sent to the model as part of the JSON schema, so they double
+as extraction instructions. Every model-facing field is required (optional values
+are nullable) and extra fields are forbidden, as OpenAI strict structured outputs
+require. Quote fields are hidden from the schema because code fills them in.
 """
 
 from __future__ import annotations
@@ -15,18 +17,18 @@ from __future__ import annotations
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+from pydantic.json_schema import SkipJsonSchema
 
 
 class Fact(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     doc_id: str = Field(description="doc_id of the document this fact was read from.")
-    quote: str = Field(
-        description=(
-            "Text copied exactly from that document, one sentence or less, that "
-            "states this fact. Do not paraphrase."
-        )
+    line: int = Field(
+        description="Number of the line in that document (shown as [n]) stating this fact."
     )
+    # Filled from the cited line by verify.py; never written by the model.
+    quote: SkipJsonSchema[str] = ""
 
 
 class HPDocument(Fact):
@@ -77,22 +79,25 @@ class MedicationMention(Fact):
 
 class AnticoagPlan(Fact):
     """Perioperative instructions for managing an anticoagulant around this
-    procedure. quote is the text naming the medication the plan manages."""
+    procedure. line is the line naming the medication the plan manages."""
 
     drug: str = Field(description="Medication the plan manages, as written.")
-    pre_op_quote: str | None = Field(
+    pre_op_line: int | None = Field(
         description=(
-            "Exact text of the before-surgery instruction (when to hold or stop, or "
-            "the last dose), or null if the document gives none."
+            "Line with the before-surgery instruction (when to hold or stop, or the "
+            "last dose), or null if the document gives none."
         )
     )
-    post_op_quote: str | None = Field(
+    post_op_line: int | None = Field(
         description=(
-            "Exact text of the after-surgery instruction (when or how to resume), or "
-            "null if none. Deferrals such as 'will be addressed after surgery' are "
-            "not instructions."
+            "Line with the after-surgery instruction (when or how to resume), or null "
+            "if none. Deferrals such as 'will be addressed after surgery' are not "
+            "instructions."
         )
     )
+    # Filled from the cited lines by verify.py; never written by the model.
+    pre_op_quote: SkipJsonSchema[str | None] = None
+    post_op_quote: SkipJsonSchema[str | None] = None
 
 
 class NoteVital(Fact):

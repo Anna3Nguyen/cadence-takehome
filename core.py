@@ -92,6 +92,11 @@ class Document(BaseModel):
     author: str | None = None
     text: str | None = None
 
+    def lines(self) -> list[str]:
+        """The text split into the lines the model cites; line n is lines()[n - 1]."""
+
+        return (self.text or "").splitlines()
+
 class SubmissionMetadata(BaseModel):
 
     submission_received_at: str | None = None

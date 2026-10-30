@@ -1,9 +1,10 @@
 """Fact extraction: the only step that calls the LLM.
 
-The model reads a submission's free-text documents and returns ExtractedFacts
-(see facts.py). It never sees the policy and never makes a decision: verify.py
-checks every quote and rules.py decides. Responses are cached on disk, so reruns
-are free and return identical facts.
+The model reads a submission's free-text documents, with numbered lines, and returns
+ExtractedFacts (see facts.py) that cite a document and line for each fact. It never
+sees the policy, never writes quote text, and never makes a decision: verify.py copies
+and checks each cited line and rules.py decides. Responses are cached on disk, so
+reruns are free and return identical facts.
 
 The model is sent only what extraction needs. Patient identifiers are omitted, and
 so are the structured procedure date and medication list, so the model cannot echo
@@ -33,10 +34,8 @@ policy; other software does that using the facts you return.
 
 - Read every document. Return one item per fact in the lists the schema defines, and
   leave a list empty if no document states anything for it.
-- doc_id is the id of the document the fact came from.
-- Every quote is copied exactly from that document: one sentence or less, containing
-  the value you extracted. Never paraphrase, summarize, correct typos, or join text
-  from different places.
+- Cite each fact by the doc_id of its document and the number of the line, shown as
+  [n], that states it. The values you extract must appear on that line.
 - Report only what the documents state. Do not infer or fill in values from medical
   knowledge.
 - Record every blood pressure and temperature reading as its own item, including
@@ -52,7 +51,7 @@ class ExtractionError(RuntimeError):
 
 
 def build_extraction_input(submission: PatientSubmission) -> str:
-    """Render the scheduled procedure and documents as plain text for the model."""
+    """Render the scheduled procedure and documents, with numbered lines, as plain text."""
 
     procedure = submission.procedure.procedure_type if submission.procedure else None
     blocks = [f"Scheduled procedure: {procedure or 'not stated'}"]
@@ -60,7 +59,8 @@ def build_extraction_input(submission: PatientSubmission) -> str:
         header = (
             f"=== Document doc_id={doc.doc_id} | type={doc.type} | date={doc.date} ==="
         )
-        blocks.append(f"{header}\n{doc.text or ''}")
+        numbered = (f"[{n}] {line}" for n, line in enumerate(doc.lines(), start=1))
+        blocks.append("\n".join([header, *numbered]))
     return "\n\n".join(blocks)
 
 

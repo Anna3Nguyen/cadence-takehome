@@ -14,26 +14,27 @@ from facts import (
     NoteVital,
     ProcedureDateMention,
 )
-from verify import normalize, verify_facts
+from verify import verify_facts
 
 NURSING_NOTE = (
-    "PRE-PROCEDURE NURSING ASSESSMENT\n"
-    "Arrival vitals: BP 189/112,  HR 88.  T 37.1 C.\n"
-    "08:30 addendum: BP rechecked after 24 min in a quiet room, 137/78.\n"
-    "Patient’s home meds reviewed; takes acetaminophen 500 mg PRN for pain.\n"
-    "Reports taking Elliquis 5mg BID from outside cardiologist."
+    "PRE-PROCEDURE NURSING ASSESSMENT\n"  # 1
+    "Arrival vitals: BP 189/112,  HR 88.  T 37.1 C.\n"  # 2
+    "08:30 addendum: BP rechecked after 24 min in a quiet room, 137/78.\n"  # 3
+    "Patient’s home meds reviewed; takes acetaminophen 500 mg PRN for pain.\n"  # 4
+    "Reports taking Elliquis 5mg BID from outside cardiologist."  # 5
 )
 CARDIOLOGY_NOTE = (
-    "CARDIOLOGY CONSULTATION - PERIOPERATIVE\n"
-    "Patient maintained on Xarelto 20 mg PO daily for atrial fibrillation.\n"
-    "RECOMMENDATIONS:\n"
-    "  1. Hold Xarelto for the 2 days before surgery (last dose 02/26/2026).\n"
-    "  2. Resume Xarelto 24-48 hours after surgery once hemostasis is secure.\n"
-    "  3. Continue clopidogrel; hold 5 days pre-op."
+    "CARDIOLOGY CONSULTATION - PERIOPERATIVE\n"  # 1
+    "Patient maintained on Xarelto 20 mg PO daily for atrial fibrillation.\n"  # 2
+    "RECOMMENDATIONS:\n"  # 3
+    "  1. Hold Xarelto for the 2 days before surgery (last dose 02/26/2026).\n"  # 4
+    "  2. Resume Xarelto 24-48 hours after surgery once hemostasis is secure.\n"  # 5
+    "  3. Continue clopidogrel; hold 5 days pre-op."  # 6
 )
 HP_NOTE = (
-    "HISTORY AND PHYSICAL: pre-op evaluation complete for planned procedure.\n"
-    "Procedure date target: 2026-03-01."
+    "HISTORY AND PHYSICAL: pre-op evaluation complete for planned procedure.\n"  # 1
+    "\n"  # 2 (blank)
+    "Vitals 10:05  BP: 127/80, HR 89, 98.1 °F temporal, SpO2 99% RA"  # 3
 )
 
 
@@ -54,19 +55,25 @@ def _facts(**lists: list[Any]) -> ExtractedFacts:
     return ExtractedFacts(**{**empty, **lists})
 
 
-def _hp(quote: str, doc_id: str = "hp") -> HPDocument:
-    return HPDocument(doc_id=doc_id, quote=quote, is_preop_hp=True)
+def _hp(line: int, doc_id: str = "hp") -> HPDocument:
+    return HPDocument(doc_id=doc_id, line=line, is_preop_hp=True)
 
 
-def _bp(quote: str, systolic: float, diastolic: float) -> NoteVital:
+def _vital(
+    doc_id: str,
+    line: int,
+    systolic: float | None = None,
+    diastolic: float | None = None,
+    temperature: float | None = None,
+) -> NoteVital:
     return NoteVital(
-        doc_id="nursing",
-        quote=quote,
-        kind="blood_pressure",
+        doc_id=doc_id,
+        line=line,
+        kind="temperature" if temperature is not None else "blood_pressure",
         systolic=systolic,
         diastolic=diastolic,
-        temperature=None,
-        temperature_unit=None,
+        temperature=temperature,
+        temperature_unit="F" if temperature is not None else None,
         measured_on=None,
         measured_time=None,
     )
@@ -75,150 +82,138 @@ def _bp(quote: str, systolic: float, diastolic: float) -> NoteVital:
 def _plan(**overrides: Any) -> AnticoagPlan:
     fields = {
         "doc_id": "cardiology",
-        "quote": "Patient maintained on Xarelto 20 mg PO daily",
+        "line": 2,
         "drug": "Xarelto",
-        "pre_op_quote": "Hold Xarelto for the 2 days before surgery",
-        "post_op_quote": "Resume Xarelto 24-48 hours after surgery",
+        "pre_op_line": 4,
+        "post_op_line": 5,
     }
     return AnticoagPlan(**{**fields, **overrides})
 
 
-def _mention(name: str, quote: str) -> MedicationMention:
-    return MedicationMention(doc_id="nursing", quote=quote, name=name, status="taking")
+def _mention(name: str, line: int) -> MedicationMention:
+    return MedicationMention(doc_id="nursing", line=line, name=name, status="taking")
 
 
 # -------------------------
-# Normalization and quote matching
+# Quotes come from the cited line
 # -------------------------
 
 
-def test_normalize_ignores_case_whitespace_and_quote_styles() -> None:
-    assert normalize("Patient’s  BP\n189/112") == normalize("patient's bp 189/112")
+def test_quote_is_the_cited_line_without_indentation() -> None:
+    result = verify_facts(_facts(anticoag_plans=[_plan()]), _submission())
+
+    [plan] = result.facts.anticoag_plans
+    assert plan.quote == (
+        "Patient maintained on Xarelto 20 mg PO daily for atrial fibrillation."
+    )
+    assert plan.pre_op_quote == (
+        "1. Hold Xarelto for the 2 days before surgery (last dose 02/26/2026)."
+    )
+    assert plan.post_op_quote == (
+        "2. Resume Xarelto 24-48 hours after surgery once hemostasis is secure."
+    )
 
 
-@pytest.mark.parametrize(
-    "quote",
-    [
-        "HISTORY AND PHYSICAL: pre-op evaluation complete for planned procedure.",
-        "history and physical:   PRE-OP evaluation\ncomplete",
-        "  pre-op evaluation complete for planned procedure.  ",
-    ],
-)
-def test_quote_matches_despite_case_and_whitespace(quote: str) -> None:
-    result = verify_facts(_facts(hp_documents=[_hp(quote)]), _submission())
+def test_special_characters_are_kept_exactly() -> None:
+    # Regression: the model used to garble "°" when copying quotes (case_00003).
+    result = verify_facts(
+        _facts(note_vitals=[_vital("hp", 3, temperature=98.1)]), _submission()
+    )
 
-    assert len(result.facts.hp_documents) == 1
+    [vital] = result.facts.note_vitals
+    assert "98.1 °F temporal" in vital.quote
     assert result.issues == []
 
 
-def test_straight_apostrophe_matches_curly_apostrophe_in_document() -> None:
-    # NURSING_NOTE writes "Patient’s" with a curly apostrophe.
-    fact = _hp("Patient's home meds reviewed", doc_id="nursing")
-
-    result = verify_facts(_facts(hp_documents=[fact]), _submission())
-
-    assert result.issues == []
-    assert result.facts.hp_documents == [fact]
-
-
 # -------------------------
-# Discarded facts become issues
+# Bad citations become issues
 # -------------------------
 
 
 @pytest.mark.parametrize(
     ("fact", "expected_problem"),
     [
-        (_hp("Pre-operative evaluation was completed."), "does not appear"),
-        (_hp(HP_NOTE, doc_id="missing-doc"), "not in this submission"),
-        (_hp(""), "quote is empty"),
-        (_hp("   \n "), "quote is empty"),
+        (_hp(99), "line 99 does not exist"),
+        (_hp(0), "line 0 does not exist"),
+        (_hp(2), "line 2 is blank"),
+        (_hp(1, doc_id="missing-doc"), "not in this submission"),
     ],
 )
-def test_unverifiable_quote_discards_fact_and_raises_issue(
+def test_bad_citation_discards_fact_and_raises_issue(
     fact: HPDocument, expected_problem: str
 ) -> None:
     result = verify_facts(_facts(hp_documents=[fact]), _submission())
 
     assert result.facts.hp_documents == []
-    assert len(result.issues) == 1
-    issue = result.issues[0]
+    [issue] = result.issues
     assert issue.category == "MISSING_REQUIRED_DATA"
     assert issue.reason == "unverified_quote"
     assert issue.rule == "hp"
     assert expected_problem in issue.finding
     assert issue.sources[0].id == fact.doc_id
-    assert issue.sources[0].quote == fact.quote
+    assert issue.sources[0].quote == f"(line {fact.line} could not be read)"
 
 
 def test_issue_source_carries_document_date() -> None:
-    result = verify_facts(_facts(hp_documents=[_hp("not in the note")]), _submission())
+    result = verify_facts(_facts(hp_documents=[_hp(99)]), _submission())
 
     assert result.issues[0].sources[0].date == "2026-02-21"
 
 
 def test_vital_numbers_are_compared_as_numbers() -> None:
-    reading = _bp(
-        "08:30 addendum: BP rechecked after 24 min in a quiet room, 137/78", 137.0, 78
-    )
+    reading = _vital("nursing", 3, systolic=137.0, diastolic=78)
 
     result = verify_facts(_facts(note_vitals=[reading]), _submission())
 
-    assert result.facts.note_vitals == [reading]
+    assert [v.quote for v in result.facts.note_vitals] == [
+        "08:30 addendum: BP rechecked after 24 min in a quiet room, 137/78."
+    ]
     assert result.issues == []
 
 
-def test_vital_with_number_not_in_quote_is_discarded() -> None:
-    reading = _bp(
-        "08:30 addendum: BP rechecked after 24 min in a quiet room, 137/78", 190, 78
-    )
+def test_vital_with_number_not_on_the_line_is_discarded_and_shows_the_line() -> None:
+    reading = _vital("nursing", 3, systolic=190, diastolic=78)
 
     result = verify_facts(_facts(note_vitals=[reading]), _submission())
 
     assert result.facts.note_vitals == []
-    assert result.issues[0].rule == "blood_pressure"
-    assert "systolic 190" in result.issues[0].finding
+    [issue] = result.issues
+    assert issue.rule == "blood_pressure"
+    assert "systolic 190 does not appear on line 3" in issue.finding
+    assert issue.sources[0].quote.endswith("137/78.")
 
 
-def test_temperature_is_checked_against_quote() -> None:
-    reading = NoteVital(
-        doc_id="nursing",
-        quote="T 37.1 C.",
-        kind="temperature",
-        systolic=None,
-        diastolic=None,
-        temperature=38.6,
-        temperature_unit="C",
-        measured_on=None,
-        measured_time=None,
+def test_temperature_is_checked_against_the_line() -> None:
+    result = verify_facts(
+        _facts(note_vitals=[_vital("nursing", 2, temperature=38.6)]), _submission()
     )
-
-    result = verify_facts(_facts(note_vitals=[reading]), _submission())
 
     assert result.facts.note_vitals == []
     assert result.issues[0].rule == "temperature"
 
 
 def test_each_fact_type_maps_to_its_rule() -> None:
-    bad = "this text is nowhere in the chart"
     facts = _facts(
         consents=[
             Consent(
                 doc_id="hp",
-                quote=bad,
+                line=99,
                 patient_signed=True,
                 procedure_named=None,
                 matches_scheduled_procedure=True,
             )
         ],
         procedure_date_mentions=[
-            ProcedureDateMention(doc_id="hp", quote=bad, date="2026-03-01")
+            ProcedureDateMention(doc_id="hp", line=99, date="2026-03-01")
         ],
     )
 
     result = verify_facts(facts, _submission())
 
-    assert sorted(issue.rule for issue in result.issues) == ["consent", "required_fields"]
+    assert sorted(issue.rule for issue in result.issues) == [
+        "consent",
+        "required_fields",
+    ]
 
 
 # -------------------------
@@ -227,27 +222,28 @@ def test_each_fact_type_maps_to_its_rule() -> None:
 
 
 def test_misspelled_anticoagulant_mention_is_verified_and_kept() -> None:
-    mention = _mention("Elliquis 5mg BID", "Reports taking Elliquis 5mg BID")
+    result = verify_facts(
+        _facts(medication_mentions=[_mention("Elliquis 5mg BID", 5)]), _submission()
+    )
 
-    result = verify_facts(_facts(medication_mentions=[mention]), _submission())
-
-    assert result.facts.medication_mentions == [mention]
+    [mention] = result.facts.medication_mentions
+    assert mention.quote == "Reports taking Elliquis 5mg BID from outside cardiologist."
     assert result.ignored_medications == []
 
 
-def test_anticoagulant_mention_naming_a_different_drug_is_discarded() -> None:
-    mention = _mention("Xarelto", "Reports taking Elliquis 5mg BID")
-
-    result = verify_facts(_facts(medication_mentions=[mention]), _submission())
+def test_anticoagulant_mention_citing_a_line_about_another_drug_is_discarded() -> None:
+    result = verify_facts(
+        _facts(medication_mentions=[_mention("Xarelto", 5)]), _submission()
+    )
 
     assert result.facts.medication_mentions == []
     assert result.issues[0].rule == "anticoagulation"
-    assert "'Xarelto' does not appear" in result.issues[0].finding
+    assert "'Xarelto' does not appear on line 5" in result.issues[0].finding
 
 
 def test_non_anticoagulant_mentions_are_recorded_not_verified_into_issues() -> None:
-    good = _mention("acetaminophen 500 mg PRN", "takes acetaminophen 500 mg PRN for pain")
-    bad = _mention("omeprazole 20 mg", "takes omeprazole 20 mg daily")
+    good = _mention("acetaminophen 500 mg PRN", 4)
+    bad = _mention("omeprazole 20 mg", 99)
 
     result = verify_facts(_facts(medication_mentions=[good, bad]), _submission())
 
@@ -260,46 +256,41 @@ def test_non_anticoagulant_mentions_are_recorded_not_verified_into_issues() -> N
     first = result.ignored_medications[0]
     assert first.reason == "not an anticoagulant"
     assert (first.source.id, first.source.date) == ("nursing", "2026-02-26")
+    assert "acetaminophen 500 mg PRN" in first.source.quote
 
 
-def test_complete_plan_is_kept_unchanged() -> None:
-    plan = _plan()
+def test_bad_post_op_line_clears_only_that_instruction() -> None:
+    result = verify_facts(
+        _facts(anticoag_plans=[_plan(post_op_line=42)]), _submission()
+    )
 
-    result = verify_facts(_facts(anticoag_plans=[plan]), _submission())
+    [kept] = result.facts.anticoag_plans
+    assert kept.pre_op_quote is not None
+    assert kept.post_op_quote is None
+    [issue] = result.issues
+    assert issue.rule == "anticoagulation"
+    assert "after-surgery instruction" in issue.finding
+    assert issue.sources[0].quote == "(line 42 could not be read)"
 
-    assert result.facts.anticoag_plans == [plan]
+
+def test_plan_without_a_cited_instruction_has_no_quote_and_no_issue() -> None:
+    result = verify_facts(
+        _facts(anticoag_plans=[_plan(post_op_line=None)]), _submission()
+    )
+
+    assert result.facts.anticoag_plans[0].post_op_quote is None
     assert result.issues == []
 
 
-def test_bad_post_op_quote_clears_only_that_instruction() -> None:
-    plan = _plan(post_op_quote="Restart Xarelto on post-op day 1.")
-
-    result = verify_facts(_facts(anticoag_plans=[plan]), _submission())
-
-    kept = result.facts.anticoag_plans[0]
-    assert kept.pre_op_quote == plan.pre_op_quote
-    assert kept.post_op_quote is None
-    assert len(result.issues) == 1
-    assert result.issues[0].rule == "anticoagulation"
-    assert "after-surgery instruction" in result.issues[0].finding
-
-
-def test_bad_main_quote_discards_whole_plan() -> None:
-    plan = _plan(quote="Patient takes Xarelto twice daily.")
-
-    result = verify_facts(_facts(anticoag_plans=[plan]), _submission())
+def test_bad_main_line_discards_whole_plan() -> None:
+    result = verify_facts(_facts(anticoag_plans=[_plan(line=3)]), _submission())
 
     assert result.facts.anticoag_plans == []
-    assert len(result.issues) == 1
+    assert "'Xarelto' does not appear on line 3" in result.issues[0].finding
 
 
 def test_plan_for_non_anticoagulant_is_recorded_as_ignored() -> None:
-    plan = _plan(
-        quote="Continue clopidogrel; hold 5 days pre-op.",
-        drug="clopidogrel",
-        pre_op_quote="hold 5 days pre-op",
-        post_op_quote=None,
-    )
+    plan = _plan(line=6, drug="clopidogrel", pre_op_line=6, post_op_line=None)
 
     result = verify_facts(_facts(anticoag_plans=[plan]), _submission())
 

@@ -18,11 +18,7 @@ from facts import ExtractedFacts, HPDocument
 NOTE_TEXT = "PRE-OP H&P\nPre-op evaluation complete.\n  BP 120/80, T 98.6 F."
 
 FACTS = ExtractedFacts(
-    hp_documents=[
-        HPDocument(
-            doc_id="doc-1", quote="Pre-op evaluation complete.", is_preop_hp=True
-        )
-    ],
+    hp_documents=[HPDocument(doc_id="doc-1", line=2, is_preop_hp=True)],
     consents=[],
     medication_mentions=[],
     anticoag_plans=[],
@@ -87,12 +83,18 @@ def test_request_uses_strict_schema_and_deterministic_settings(
     assert call["input"] == build_extraction_input(submission)
 
 
-def test_input_keeps_document_text_verbatim(submission: PatientSubmission) -> None:
+def test_input_numbers_each_document_line_verbatim(
+    submission: PatientSubmission,
+) -> None:
     user_input = build_extraction_input(submission)
 
-    assert NOTE_TEXT in user_input
-    assert "doc_id=doc-1" in user_input
-    assert "Scheduled procedure: Elective carpal tunnel release" in user_input
+    assert (
+        "=== Document doc_id=doc-1 | type=History and Physical | date=2026-02-21 ===\n"
+        "[1] PRE-OP H&P\n"
+        "[2] Pre-op evaluation complete.\n"
+        "[3]   BP 120/80, T 98.6 F."
+    ) in user_input
+    assert user_input.startswith("Scheduled procedure: Elective carpal tunnel release")
 
 
 @pytest.mark.parametrize(

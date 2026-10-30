@@ -87,13 +87,14 @@ def _chart(
 
 def _hp(doc_id: str, is_preop: bool = True) -> HPDocument:
     return HPDocument(
-        doc_id=doc_id, quote=f"H&P quote from {doc_id}", is_preop_hp=is_preop
+        doc_id=doc_id, line=1, quote=f"H&P quote from {doc_id}", is_preop_hp=is_preop
     )
 
 
 def _consent(doc_id: str, signed: bool = True, matches: bool = True) -> Consent:
     return Consent(
         doc_id=doc_id,
+        line=1,
         quote=f"Consent quote from {doc_id}",
         patient_signed=signed,
         procedure_named="carpal tunnel release"
@@ -105,7 +106,7 @@ def _consent(doc_id: str, signed: bool = True, matches: bool = True) -> Consent:
 
 def _date_mention(doc_id: str, stated: str) -> ProcedureDateMention:
     return ProcedureDateMention(
-        doc_id=doc_id, quote=f"Surgery on {stated}", date=stated
+        doc_id=doc_id, line=1, quote=f"Surgery on {stated}", date=stated
     )
 
 
@@ -435,15 +436,22 @@ def _med(name: str, active: bool | None = True) -> dict[str, Any]:
 
 def _mention(doc_id: str, name: str, status: str = "taking") -> MedicationMention:
     return MedicationMention(
-        doc_id=doc_id, quote=f"{name} mentioned in {doc_id}", name=name, status=status
+        doc_id=doc_id,
+        line=1,
+        quote=f"{name} mentioned in {doc_id}",
+        name=name,
+        status=status,
     )
 
 
 def _plan(doc_id: str, drug: str, pre: bool = True, post: bool = True) -> AnticoagPlan:
     return AnticoagPlan(
         doc_id=doc_id,
+        line=1,
         quote=f"Maintained on {drug}",
         drug=drug,
+        pre_op_line=2 if pre else None,
+        post_op_line=3 if post else None,
         pre_op_quote=f"Hold {drug} 2 days before surgery" if pre else None,
         post_op_quote=f"Resume {drug} 48 hours after surgery" if post else None,
     )
@@ -667,6 +675,7 @@ def _note_bp(
 ) -> NoteVital:
     return NoteVital(
         doc_id=doc_id,
+        line=1,
         quote=f"BP {systolic:g}/{diastolic:g}",
         kind="blood_pressure",
         systolic=systolic,
@@ -681,6 +690,7 @@ def _note_bp(
 def _note_temp(doc_id: str, value: float, unit: str | None) -> NoteVital:
     return NoteVital(
         doc_id=doc_id,
+        line=1,
         quote=f"T {value:g} {unit}",
         kind="temperature",
         systolic=None,

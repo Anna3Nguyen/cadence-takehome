@@ -40,9 +40,21 @@ def test_extracted_facts_covers_every_fact_type() -> None:
 
 
 @pytest.mark.parametrize("fact_type", FACT_TYPES)
-def test_every_fact_requires_doc_id_and_quote(fact_type: type[BaseModel]) -> None:
-    for name in ("doc_id", "quote"):
+def test_every_fact_requires_a_document_and_line_citation(
+    fact_type: type[BaseModel],
+) -> None:
+    for name in ("doc_id", "line"):
         assert fact_type.model_fields[name].is_required()
+
+
+def test_model_never_writes_quote_text() -> None:
+    schema = ExtractedFacts.model_json_schema()
+    for definition in schema["$defs"].values():
+        assert not any(name.endswith("quote") for name in definition["properties"])
+    assert set(schema["$defs"]["AnticoagPlan"]["properties"]) >= {
+        "pre_op_line",
+        "post_op_line",
+    }
 
 
 def _iter_objects(node: Any) -> Iterator[dict[str, Any]]:
