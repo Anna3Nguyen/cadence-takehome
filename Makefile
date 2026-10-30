@@ -4,7 +4,7 @@ REPORT ?= data/eval_report.json
 DETERMINISM_REPORT ?= data/determinism_report.json
 MODEL ?= gpt-4.1-mini
 
-.PHONY: baseline evals determinism score report test all clean
+.PHONY: baseline evals score report test all clean
 
 baseline:
 	uv run run_baseline.py \
@@ -18,12 +18,15 @@ evals:
 		--outputs $(OUTPUT) \
 		--report $(REPORT)
 
-determinism:
-	uv run run_evals.py \
-		--determinism \
-		--input $(INPUT) \
-		--model $(MODEL) \
-		--report $(DETERMINISM_REPORT)
+# Disabled: extractions are cached on disk (.cache/extractions), so repeated runs
+# replay the cached result and this check would always report 100% without
+# re-running the model. See WRITEUP.md for the cache-off stability check instead.
+# determinism:
+# 	uv run run_evals.py \
+# 		--determinism \
+# 		--input $(INPUT) \
+# 		--model $(MODEL) \
+# 		--report $(DETERMINISM_REPORT)
 
 score:
 	@python3 -c 'import json; r=json.load(open("$(REPORT)")); s=(r.get("primary_score",{}) or {}).get("value_pct"); print(s if s is not None else r.get("local_metrics_summary",{}).get("aggregate_local_score_pct", 0.0))'
@@ -38,7 +41,7 @@ test:
 		--with 'pytest>=8.0.0' \
 		python -m pytest tests
 
-all: baseline evals determinism score
+all: baseline evals score
 
 clean:
 	rm -f data/baseline_outputs.jsonl \

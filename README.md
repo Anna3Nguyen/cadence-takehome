@@ -1,90 +1,83 @@
 # Pre-Op Triage Take-Home
 
-## Objective
-
-Implement `triage_submission(...)` in `core.py` - it is a pre-op triage function for a single submission package. It is currently a naive LLM-based solution that makes a real model API call. The starter implementation intentionally does not follow some best practices in using the OpenAI API. You may use whatever file structure makes sense for your solution.
-
-Your output must match this schema:
+`triage_submission(...)` in `core.py` evaluates one pre-op submission package against the Cadence pre-operative scheduling policy and returns:
 
 - `decision`: `READY | NEEDS_FOLLOW_UP | NOT_CLEARED`
-- `issues[]`: `category` + evidence (how you design this is up to you)
+- `issues[]`: each with a `category`, the rule, a plain-language `finding`, and `sources` (the exact document line, lab, vital, or field it came from)
+- `checks[]`: every rule that passed, did not apply, or could not be evaluated, with the same evidence
+- `ignored_medications[]`: medications no rule acted on, so a reviewer can see nothing was missed
 - `explanation`
 
-## What Is Provided
+An LLM only extracts facts from the free-text documents, citing a document and line for each. Plain Python verifies every citation and applies the policy rules; the model never makes the decision. See [WRITEUP.md](WRITEUP.md) for the design and reasoning.
 
-- `data/patients_sample_50.jsonl` includes:
-  - `case_id`
-  - `submission`
-  - `label` (what a human labeled this case as)
-- `run_baseline.py` runs your `triage_submission` implementation and writes outputs.
-- `run_evals.py` scores outputs against provided `label` and can run determinism checks.
+## How it works
 
-## Completion
+```
+submission ─► extraction.py ─► verify.py ─► rules.py ─► decision + evidence
+              (LLM: facts,     (check each   (policy in
+               cite doc+line)   cited line)   plain Python)
+```
 
-Note: this exercise is evaluated on engineering judgment. You may not reach a 100% score, and that is OK! We are looking to understand how you approached the problem and designed a working solution.
+| File | Purpose |
+|---|---|
+| `core.py` | Input/output schemas and the `triage_submission` entry point |
+| `pipeline.py` | Runs the steps above; fails safe to `NEEDS_FOLLOW_UP` on any error |
+| `extraction.py` | The only LLM call: strict structured output, temperature 0, on-disk cache |
+| `facts.py` | Schema of facts the LLM may return (each cites `doc_id` + `line`) |
+| `verify.py` | Checks each cited line exists and states the claimed values; copies it in as the quote |
+| `rules.py` | The four policy rules, missing-data/conflict checks, and the final decision |
+| `policy.py` | Policy windows, thresholds, lab codes, and anticoagulant names as data |
+| `run_baseline.py`, `run_evals.py`, `view_report.py` | Provided harness: run, score, and browse results |
 
 ## Setup
 
-1. Confirm `uv` is installed.
+1. Confirm `uv` is installed:
 
 ```bash
 uv --version
 ```
 
-2. Set your OpenAI API key.
+2. Provide your OpenAI API key. Either export it:
 
 ```bash
 export OPENAI_API_KEY="<your_api_key>"
 ```
 
-## Recommended Workflow
-
-1. Implement `triage_submission` in `core.py`.
-2. Run baseline outputs:
+or put `OPENAI_API_KEY=<your_api_key>` in a `.env` file at the repo root (it is gitignored) and load it into your shell before running `make`:
 
 ```bash
-make baseline
+set -a; . ./.env; set +a
 ```
 
-3. Run eval scoring:
+Dependencies are declared inline in the scripts and installed by `uv` automatically.
+
+## Run
 
 ```bash
-make evals
+make baseline   # triage all cases -> data/baseline_outputs.jsonl
+make evals      # score against labels -> data/eval_report.json
+make score      # print the score
+make report     # browse results in a terminal UI (press f on a metric to filter failures, q to quit)
+make all        # baseline + evals + score
 ```
 
-4. Run determinism check:
+Extractions are cached in `.cache/extractions/`, keyed by model, prompt, schema, and input, so re-running `make baseline` makes no API calls unless something changed. Delete `.cache/` to force fresh extractions.
 
-```bash
-make determinism
-```
-
-5. Print score:
-
-```bash
-make score
-```
-
-6. View the interactive report (TUI):
-
-```bash
-make report
-```
-
-This opens a terminal UI (`view_report.py`) that shows per-case results side-by-side with oracle expectations. You can browse records, see metric pass/fail status, and inspect submission data. Press `f` on a metric row to filter the case list to failures. Press `q` to quit.
+`make determinism` is disabled: with the cache it would replay identical results and always report 100%. See [WRITEUP.md](WRITEUP.md) for the cache-off stability check.
 
 ## Tests
-
-Run the unit tests with:
 
 ```bash
 make test
 ```
 
+The tests use a mocked OpenAI client and make no API calls.
+
 ## Outputs
 
-- Baseline outputs: `data/baseline_outputs.jsonl`
+- Triage outputs: `data/baseline_outputs.jsonl`
 - Eval report: `data/eval_report.json`
-- Determinism report: `data/determinism_report.json`
+- Extraction cache: `.cache/extractions/`
 
 ## Configurable Variables
 
@@ -92,4 +85,3 @@ make test
 - `INPUT` (default `data/patients_sample_50.jsonl`)
 - `OUTPUT` (default `data/baseline_outputs.jsonl`)
 - `REPORT` (default `data/eval_report.json`)
-- `DETERMINISM_REPORT` (default `data/determinism_report.json`)
