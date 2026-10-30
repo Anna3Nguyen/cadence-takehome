@@ -4,6 +4,8 @@
 # dependencies = [
 #   "openai>=2.0.0",
 #   "pydantic>=2.8.0",
+#   # The SDK's HTTP client decodes brotli responses with an API added in 1.2.
+#   "brotli>=1.2",
 # ]
 # ///
 
