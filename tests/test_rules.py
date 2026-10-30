@@ -1,22 +1,35 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 
-from core import PatientSubmission, RuleCheck, TriageIssue
-from facts import Consent, ExtractedFacts, HPDocument, ProcedureDateMention
+from core import PatientSubmission, RuleCheck, RuleId, TriageIssue
+from facts import (
+    AnticoagPlan,
+    Consent,
+    ExtractedFacts,
+    HPDocument,
+    MedicationMention,
+    NoteVital,
+    ProcedureDateMention,
+)
 from policy import POLICY
 from rules import (
     Chart,
     Finding,
+    check_anticoagulation,
+    check_blood_pressure,
     check_consent,
     check_hp,
     check_labs,
     check_required_fields,
+    check_temperature,
     days_before,
+    decide,
     evaluate_rules,
+    ignored_structured_medications,
     parse_date,
 )
 
@@ -50,6 +63,8 @@ def _chart(
     procedure: dict[str, Any] | None = None,
     labs: list[dict[str, Any]] | None = None,
     documents: list[dict[str, Any]] | None = None,
+    medications: list[dict[str, Any]] | None = None,
+    vitals: list[dict[str, Any]] | None = None,
     **facts: list[Any],
 ) -> Chart:
     submission = PatientSubmission.model_validate(
@@ -62,6 +77,8 @@ def _chart(
             },
             "labs": labs or [],
             "documents": documents or [],
+            "medications": medications or [],
+            "vitals": vitals or [],
         }
     )
     empty: dict[str, list[Any]] = {name: [] for name in ExtractedFacts.model_fields}
@@ -408,19 +425,521 @@ def test_lab_window_not_evaluated_without_procedure_date_but_presence_checked() 
 
 
 # -------------------------
-# Engine
+# Rule 3: anticoagulation
 # -------------------------
 
 
-def test_evaluate_rules_splits_issues_and_checks() -> None:
+def _med(name: str, active: bool | None = True) -> dict[str, Any]:
+    return {"name": name, "active": active}
+
+
+def _mention(doc_id: str, name: str, status: str = "taking") -> MedicationMention:
+    return MedicationMention(
+        doc_id=doc_id, quote=f"{name} mentioned in {doc_id}", name=name, status=status
+    )
+
+
+def _plan(doc_id: str, drug: str, pre: bool = True, post: bool = True) -> AnticoagPlan:
+    return AnticoagPlan(
+        doc_id=doc_id,
+        quote=f"Maintained on {drug}",
+        drug=drug,
+        pre_op_quote=f"Hold {drug} 2 days before surgery" if pre else None,
+        post_op_quote=f"Resume {drug} 48 hours after surgery" if post else None,
+    )
+
+
+def test_anticoagulant_only_in_a_note_counts_as_taken() -> None:
     chart = _chart(
+        documents=[_doc("nursing", 3)],
+        medication_mentions=[_mention("nursing", "Xarelto 20 mg")],
+    )
+
+    issue = _single(check_anticoagulation(chart, POLICY))
+
+    assert issue.category == "ANTICOAGULATION_MANAGEMENT"
+    assert issue.finding == (
+        "Patient takes rivaroxaban, but no perioperative plan is documented."
+    )
+    assert issue.sources[0].id == "nursing"
+
+
+def test_inactive_warfarin_confirmed_stopped_is_not_applicable() -> None:
+    chart = _chart(
+        documents=[_doc("hp", 10)],
+        medications=[_med("warfarin 5 mg PO daily", active=False)],
+        medication_mentions=[_mention("hp", "warfarin", "stopped")],
+    )
+
+    check = _single(check_anticoagulation(chart, POLICY))
+
+    assert (check.status, check.finding) == (
+        "not_applicable",
+        "warfarin is not currently taken.",
+    )
+    assert [s.id for s in check.sources] == ["medications[0]", "hp"]
+
+
+def test_unknown_status_with_uncertain_note_is_missing_data() -> None:
+    chart = _chart(
+        documents=[_doc("nursing", 2)],
+        medications=[_med("Coumadin 5 mg PO daily", active=None)],
+        medication_mentions=[_mention("nursing", "Coumadin", "uncertain")],
+    )
+
+    issue = _single(check_anticoagulation(chart, POLICY))
+
+    assert (issue.category, issue.reason) == ("MISSING_REQUIRED_DATA", "missing")
+
+
+def test_unknown_status_with_no_notes_is_missing_data() -> None:
+    chart = _chart(medications=[_med("apixaban 5 mg", active=None)])
+
+    issue = _single(check_anticoagulation(chart, POLICY))
+
+    assert (issue.category, issue.reason) == ("MISSING_REQUIRED_DATA", "missing")
+
+
+def test_list_says_taking_but_note_says_stopped_is_a_conflict() -> None:
+    chart = _chart(
+        documents=[_doc("nursing", 2)],
+        medications=[_med("Eliquis 5 mg BID")],
+        medication_mentions=[_mention("nursing", "Eliquis", "stopped")],
+    )
+
+    issue = _single(check_anticoagulation(chart, POLICY))
+
+    assert (issue.category, issue.reason) == ("MISSING_REQUIRED_DATA", "conflict")
+    assert [s.id for s in issue.sources] == ["medications[0]", "nursing"]
+
+
+def test_newer_note_overrides_older_note() -> None:
+    chart = _chart(
+        documents=[_doc("old", 30), _doc("new", 5)],
+        medication_mentions=[
+            _mention("old", "warfarin", "taking"),
+            _mention("new", "warfarin", "stopped"),
+        ],
+    )
+
+    assert _single(check_anticoagulation(chart, POLICY)).status == "not_applicable"
+
+
+def test_brand_and_generic_names_are_one_drug() -> None:
+    chart = _chart(
+        documents=[_doc("cardiology", 9), _doc("nursing", 3)],
+        medications=[_med("Coumadin 5 mg PO daily")],
+        medication_mentions=[_mention("nursing", "warfarin")],
+        anticoag_plans=[_plan("cardiology", "Coumadin")],
+    )
+
+    check = _single(check_anticoagulation(chart, POLICY))
+
+    assert check.status == "passed"
+    assert check.computed["drug"] == "warfarin"
+
+
+def test_complete_plan_passes_and_leads_the_evidence() -> None:
+    chart = _chart(
+        documents=[_doc("cardiology", 9)],
+        medications=[_med("Xarelto 20 mg")],
+        anticoag_plans=[_plan("cardiology", "Xarelto")],
+    )
+
+    check = _single(check_anticoagulation(chart, POLICY))
+
+    assert check.status == "passed"
+    assert [s.quote for s in check.sources[:3]] == [
+        "Maintained on Xarelto",
+        "Hold Xarelto 2 days before surgery",
+        "Resume Xarelto 48 hours after surgery",
+    ]
+
+
+def test_plan_without_resume_instruction_fails() -> None:
+    chart = _chart(
+        documents=[_doc("cardiology", 6)],
+        medications=[_med("warfarin 5 mg")],
+        anticoag_plans=[_plan("cardiology", "warfarin", post=False)],
+    )
+
+    issue = _single(check_anticoagulation(chart, POLICY))
+
+    assert issue.category == "ANTICOAGULATION_MANAGEMENT"
+    assert "no after-surgery instruction" in issue.finding
+
+
+def test_plan_for_a_different_anticoagulant_does_not_count() -> None:
+    chart = _chart(
+        documents=[_doc("old-plan", 20)],
+        medications=[_med("warfarin 5 mg", active=False), _med("apixaban 5 mg BID")],
+        anticoag_plans=[_plan("old-plan", "warfarin")],
+    )
+
+    findings = {f.computed["drug"]: f for f in check_anticoagulation(chart, POLICY)}
+
+    assert findings["warfarin"].status == "not_applicable"
+    assert findings["apixaban"].category == "ANTICOAGULATION_MANAGEMENT"
+
+
+def test_one_complete_plan_among_several_passes() -> None:
+    chart = _chart(
+        documents=[_doc("a", 9), _doc("b", 3)],
+        medications=[_med("Eliquis 5 mg")],
+        anticoag_plans=[_plan("b", "Eliquis", post=False), _plan("a", "Eliquis")],
+    )
+
+    check = _single(check_anticoagulation(chart, POLICY))
+
+    assert check.status == "passed"
+    assert check.sources[0].id == "a"
+
+
+def test_instructions_split_across_plans_do_not_count_as_one_plan() -> None:
+    chart = _chart(
+        documents=[_doc("a", 9), _doc("b", 3)],
+        medications=[_med("Eliquis 5 mg")],
+        anticoag_plans=[
+            _plan("a", "Eliquis", post=False),
+            _plan("b", "Eliquis", pre=False),
+        ],
+    )
+
+    issue = _single(check_anticoagulation(chart, POLICY))
+
+    assert "no single plan covers both" in issue.finding
+
+
+def test_antiplatelets_only_is_not_applicable() -> None:
+    chart = _chart(medications=[_med("aspirin 81 mg"), _med("clopidogrel 75 mg")])
+
+    check = _single(check_anticoagulation(chart, POLICY))
+
+    assert check.status == "not_applicable"
+
+
+def test_ignored_structured_medications_lists_non_anticoagulants() -> None:
+    chart = _chart(
+        medications=[_med("aspirin 81 mg"), _med("Xarelto 20 mg"), _med("tamsulosin")]
+    )
+
+    ignored = ignored_structured_medications(chart)
+
+    assert [(m.name, m.source.id) for m in ignored] == [
+        ("aspirin 81 mg", "medications[0]"),
+        ("tamsulosin", "medications[2]"),
+    ]
+    assert all(m.quote_verified for m in ignored)
+
+
+# -------------------------
+# Rule 4: vitals
+# -------------------------
+
+
+def _bp_vital(
+    systolic: float, diastolic: float, days: int, at: str = "10:00"
+) -> dict[str, Any]:
+    return {
+        "type": "blood_pressure",
+        "systolic": systolic,
+        "diastolic": diastolic,
+        "date": f"{_on(days)}T{at}:00Z",
+        "source": "Pre-op clinic",
+    }
+
+
+def _temp_vital(value_f: float, days: int, at: str = "10:00") -> dict[str, Any]:
+    return {
+        "type": "temperature",
+        "value_f": value_f,
+        "date": f"{_on(days)}T{at}:00Z",
+        "source": "Pre-op clinic",
+    }
+
+
+def _note_bp(
+    doc_id: str,
+    systolic: float,
+    diastolic: float,
+    at: str | None = None,
+    measured_on: str | None = None,
+) -> NoteVital:
+    return NoteVital(
+        doc_id=doc_id,
+        quote=f"BP {systolic:g}/{diastolic:g}",
+        kind="blood_pressure",
+        systolic=systolic,
+        diastolic=diastolic,
+        temperature=None,
+        temperature_unit=None,
+        measured_on=measured_on,
+        measured_time=at,
+    )
+
+
+def _note_temp(doc_id: str, value: float, unit: str | None) -> NoteVital:
+    return NoteVital(
+        doc_id=doc_id,
+        quote=f"T {value:g} {unit}",
+        kind="temperature",
+        systolic=None,
+        diastolic=None,
+        temperature=value,
+        temperature_unit=unit,
+        measured_on=None,
+        measured_time=None,
+    )
+
+
+@pytest.mark.parametrize(
+    ("systolic", "diastolic", "held"),
+    [(179, 109, False), (180, 80, True), (120, 110, True)],
+)
+def test_bp_thresholds_are_inclusive(
+    systolic: float, diastolic: float, held: bool
+) -> None:
+    chart = _chart(vitals=[_bp_vital(systolic, diastolic, 2)])
+
+    finding = _single(check_blood_pressure(chart, POLICY))
+
+    assert isinstance(finding, TriageIssue) is held
+    if held:
+        assert finding.category == "ACUTE_SAFETY_EXCLUSION"
+
+
+def test_later_timed_recheck_replaces_high_reading() -> None:
+    chart = _chart(
+        documents=[_doc("nursing", 1)],
+        note_vitals=[
+            _note_bp("nursing", 189, 112, at="08:06"),
+            _note_bp("nursing", 137, 78, at="08:30"),
+        ],
+    )
+
+    check = _single(check_blood_pressure(chart, POLICY))
+
+    assert check.status == "passed"
+    assert [s.quote for s in check.sources] == ["BP 137/78", "BP 189/112"]
+
+
+def test_recheck_still_over_limit_is_held() -> None:
+    chart = _chart(
+        documents=[_doc("nursing", 1)],
+        note_vitals=[
+            _note_bp("nursing", 192, 106, at="08:00"),
+            _note_bp("nursing", 183, 104, at="08:24"),
+        ],
+    )
+
+    issue = _single(check_blood_pressure(chart, POLICY))
+
+    assert issue.category == "ACUTE_SAFETY_EXCLUSION"
+    assert issue.computed["reading"] == "183/104"
+
+
+def test_same_day_untimed_readings_use_the_most_severe() -> None:
+    chart = _chart(
+        documents=[_doc("nursing", 1)],
+        note_vitals=[_note_bp("nursing", 150, 90), _note_bp("nursing", 185, 95)],
+    )
+
+    issue = _single(check_blood_pressure(chart, POLICY))
+
+    assert issue.computed["reading"] == "185/95"
+    assert "could not be put in order" in issue.finding
+
+
+def test_same_day_structured_and_note_times_are_not_compared() -> None:
+    chart = _chart(
+        documents=[_doc("nursing", 2)],
+        vitals=[_bp_vital(120, 80, 2, at="10:00")],
+        note_vitals=[_note_bp("nursing", 185, 100, at="08:30")],
+    )
+
+    issue = _single(check_blood_pressure(chart, POLICY))
+
+    assert issue.computed["reading"] == "185/100"
+
+
+def test_newer_day_wins_over_older_high_reading() -> None:
+    chart = _chart(vitals=[_bp_vital(184, 112, 10), _bp_vital(123, 70, 3)])
+
+    check = _single(check_blood_pressure(chart, POLICY))
+
+    assert check.status == "passed"
+    assert check.computed["reading"] == "123/70"
+
+
+def test_note_reading_dated_by_its_own_text_not_its_document() -> None:
+    # A note written 1 day out describes a reading from 10 days out; the structured
+    # reading from 3 days out is newer.
+    chart = _chart(
+        documents=[_doc("summary", 1)],
+        vitals=[_bp_vital(120, 80, 3)],
+        note_vitals=[_note_bp("summary", 184, 112, measured_on=_on(10))],
+    )
+
+    assert _single(check_blood_pressure(chart, POLICY)).status == "passed"
+
+
+def test_no_bp_anywhere_is_missing_data() -> None:
+    issue = _single(check_blood_pressure(_chart(), POLICY))
+
+    assert (issue.category, issue.reason) == ("MISSING_REQUIRED_DATA", "missing")
+
+
+def test_different_values_at_the_same_time_is_a_conflict() -> None:
+    chart = _chart(
+        documents=[_doc("a", 1), _doc("b", 1)],
+        note_vitals=[
+            _note_bp("a", 120, 80, at="09:00"),
+            _note_bp("b", 150, 95, at="09:00"),
+        ],
+    )
+
+    conflict, result = check_blood_pressure(chart, POLICY)
+
+    assert (conflict.category, conflict.reason) == ("MISSING_REQUIRED_DATA", "conflict")
+    assert result.status == "passed"
+
+
+def test_duplicate_reading_is_not_a_conflict() -> None:
+    chart = _chart(
+        documents=[_doc("a", 1), _doc("b", 1)],
+        note_vitals=[
+            _note_bp("a", 120, 80, at="09:00"),
+            _note_bp("b", 120, 80, at="09:00"),
+        ],
+    )
+
+    assert _single(check_blood_pressure(chart, POLICY)).status == "passed"
+
+
+@pytest.mark.parametrize(("value_f", "held"), [(100.4, False), (100.5, True)])
+def test_fever_threshold_is_exclusive(value_f: float, held: bool) -> None:
+    finding = _single(
+        check_temperature(_chart(vitals=[_temp_vital(value_f, 2)]), POLICY)
+    )
+
+    assert isinstance(finding, TriageIssue) is held
+
+
+@pytest.mark.parametrize(
+    ("celsius", "fahrenheit", "held"),
+    [(38.6, "101.5 F", True), (37.9, "100.2 F", False), (38.0, "100.4 F", False)],
+)
+def test_celsius_note_readings_are_converted(
+    celsius: float, fahrenheit: str, held: bool
+) -> None:
+    chart = _chart(
+        documents=[_doc("nursing", 1)],
+        note_vitals=[_note_temp("nursing", celsius, "C")],
+    )
+
+    finding = _single(check_temperature(chart, POLICY))
+
+    assert finding.computed["reading"] == fahrenheit
+    assert isinstance(finding, TriageIssue) is held
+
+
+def test_newer_note_fever_overrides_older_normal_structured_temperature() -> None:
+    chart = _chart(
+        documents=[_doc("nursing", 1)],
+        vitals=[_temp_vital(98.9, 3)],
+        note_vitals=[_note_temp("nursing", 38.7, "C")],
+    )
+
+    issue = _single(check_temperature(chart, POLICY))
+
+    assert issue.category == "ACUTE_SAFETY_EXCLUSION"
+    assert [s.id for s in issue.sources] == ["nursing", "vitals[0]"]
+
+
+def test_no_temperature_anywhere_is_missing_data() -> None:
+    chart = _chart(vitals=[_bp_vital(120, 80, 2)])
+
+    issue = _single(check_temperature(chart, POLICY))
+
+    assert (issue.category, issue.reason) == ("MISSING_REQUIRED_DATA", "missing")
+
+
+def test_temperature_without_unit_is_skipped_not_guessed() -> None:
+    chart = _chart(
+        documents=[_doc("nursing", 1)], note_vitals=[_note_temp("nursing", 37.1, None)]
+    )
+
+    issue = _single(check_temperature(chart, POLICY))
+
+    assert issue.reason == "missing"
+    assert issue.sources[0].id == "nursing"
+
+
+# -------------------------
+# Decision and engine
+# -------------------------
+
+
+def _issue_of(category: str) -> TriageIssue:
+    return TriageIssue(
+        category=category, reason="policy_failed", rule="hp", finding="x"
+    )
+
+
+@pytest.mark.parametrize(
+    ("categories", "decision"),
+    [
+        ([], "READY"),
+        (["REQUIRED_TESTING"], "NEEDS_FOLLOW_UP"),
+        (["MISSING_REQUIRED_DATA"], "NEEDS_FOLLOW_UP"),
+        (["REQUIRED_DOCUMENTATION", "ACUTE_SAFETY_EXCLUSION"], "NOT_CLEARED"),
+    ],
+)
+def test_decide(categories: list[str], decision: str) -> None:
+    assert decide([_issue_of(c) for c in categories]) == decision
+
+
+def _ready_chart() -> Chart:
+    return _chart(
         labs=[_lab("CBC", 5)],
-        documents=[_doc("hp", 40), _doc("consent", 2)],
+        documents=[_doc("hp", 10), _doc("consent", 2)],
+        vitals=[_bp_vital(120, 80, 2), _temp_vital(98.6, 2)],
         hp_documents=[_hp("hp")],
         consents=[_consent("consent")],
     )
 
+
+def test_evaluate_rules_splits_issues_and_checks() -> None:
+    issues, checks = evaluate_rules(_ready_chart())
+
+    assert issues == []
+    assert [check.rule for check in checks] == [
+        "required_fields",
+        "hp",
+        "consent",
+        "labs",
+        "anticoagulation",
+        "blood_pressure",
+        "temperature",
+    ]
+
+
+@pytest.mark.parametrize(
+    "chart",
+    [
+        _chart(),
+        _chart(procedure={"procedure_date": None, "procedure_risk": None}),
+        _ready_chart(),
+        _chart(
+            procedure={"procedure_risk": "HIGH"},
+            medications=[_med("warfarin"), _med("Eliquis", active=None)],
+            vitals=[_bp_vital(200, 120, 1)],
+        ),
+    ],
+    ids=["empty", "no-date-or-risk", "ready", "high-risk-anticoagulated-hypertensive"],
+)
+def test_every_rule_reports_on_every_chart(chart: Chart) -> None:
     issues, checks = evaluate_rules(chart)
 
-    assert [issue.rule for issue in issues] == ["hp"]
-    assert [check.rule for check in checks] == ["required_fields", "consent", "labs"]
+    reported = {finding.rule for finding in [*issues, *checks]}
+    assert reported == set(get_args(RuleId)) - {"system"}
